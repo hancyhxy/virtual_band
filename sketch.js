@@ -41,6 +41,14 @@ const HAND_CONNECTIONS = [
   [13, 17]
 ];
 
+const DRUMS = [
+  // Drum placeholders are stored with normalized positions (0-1) so they stay responsive.
+  { id: "Kick", x: 0.5, y: 0.78, r: 0.2 },
+  { id: "Snare", x: 0.35, y: 0.58, r: 0.14 },
+  { id: "Tom", x: 0.62, y: 0.45, r: 0.12 },
+  { id: "Hi-Hat", x: 0.8, y: 0.35, r: 0.1 }
+];
+
 let trackerReady = false;
 let trackerError = null;
 let videoElementRef = null;
@@ -73,6 +81,8 @@ window.draw = () => {
     drawVideoFrame();
   }
 
+  drawDrums();
+
   if (trackerError) {
     drawStatusMessage("Camera error: " + trackerError.message);
     return;
@@ -86,7 +96,6 @@ window.draw = () => {
   const hands = getLandmarks();
 
   if (!hands || hands.length === 0) {
-    drawStatusMessage("Show your hands to the camera.");
     return;
   }
 
@@ -145,6 +154,26 @@ function convertToCanvasCoordinates(landmark) {
   const x = MIRROR_PREVIEW ? width - baseX : baseX;
   const y = landmark.y * height;
   return { x, y };
+}
+
+function drawDrums() {
+  push();
+  textAlign(CENTER, CENTER);
+  DRUMS.forEach((drum) => {
+    const { x, y } = convertToCanvasCoordinates(drum);
+    const radius = drum.r * Math.min(width, height);
+
+    stroke("#1d3557");
+    strokeWeight(3);
+    fill(236, 244, 255, 120);
+    circle(x, y, radius * 2);
+
+    noStroke();
+    fill("#1d3557");
+    textSize(max(12, radius * 0.55));
+    text(drum.id, x, y);
+  });
+  pop();
 }
 
 function drawStatusMessage(message) {
