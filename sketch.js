@@ -4,6 +4,7 @@
 
 import { initTracker, getLandmarks } from "./tracker.js";
 import { isInside, shouldTrigger } from "./hitmap.js";
+import { loadDrumSamples, playDrum, unlockAudio, getAudioState } from "./audio.js";
 
 const MIRROR_PREVIEW = true; // Flip to false if you prefer a non-mirrored preview.
 const FINGER_TIP_ID = 8;
@@ -64,6 +65,8 @@ const previousFingerPositions = [];
 let trackerReady = false;
 let trackerError = null;
 let videoElementRef = null;
+let drumSamplesLoaded = false;
+let audioLoadError = null;
 
 window.setup = () => {
   const canvas = createCanvas(windowWidth, windowHeight);
@@ -81,6 +84,37 @@ window.setup = () => {
       trackerError = error;
       console.error("Failed to start the hand tracker:", error);
     });
+
+  loadDrumSamples()
+    .then(() => {
+      drumSamplesLoaded = true;
+    })
+    .catch((error) => {
+      audioLoadError = error;
+      console.error("Failed to load drum sounds:", error);
+    });
+
+  const handleUserInteraction = () => {
+    unlockAudio().catch((error) => {
+      audioLoadError = error;
+      console.error("Failed to unlock audio playback:", error);
+    });
+
+    if (!drumSamplesLoaded) {
+      loadDrumSamples()
+        .then(() => {
+          drumSamplesLoaded = true;
+        })
+        .catch((error) => {
+          audioLoadError = error;
+          console.error("Failed to load drum sounds during interaction:", error);
+        });
+    }
+  };
+
+  window.mousePressed = handleUserInteraction;
+  window.touchStarted = handleUserInteraction;
+  window.keyPressed = handleUserInteraction;
 };
 
 window.draw = () => {
@@ -150,6 +184,7 @@ window.draw = () => {
   updateDrumStates(fingerStates);
 
   drawDrums();
+  drawAudioStatus();
 
   if (!hasHands) {
     return;
@@ -241,6 +276,10 @@ function updateDrumStates(fingerStates) {
 
     if (triggered) {
       state.highlightUntil = now + HIGHLIGHT_DURATION_MS;
+      const played = playDrum(drum.id);
+      if (!played && drumSamplesLoaded) {
+        console.warn("Drum buffer missing:", drum.id);
+      }
       console.log("HIT", drum.id);
     }
 
@@ -285,4 +324,33 @@ function drawStatusMessage(message) {
   textSize(24);
   text(message, width / 2, height / 2);
   pop();
+}
+
+function drawAudioStatus() {
+  const message = getAudioStatusMessage();
+  if (!message) return;
+
+  push();
+  fill("#f5f5f5");
+  textAlign(LEFT, BOTTOM);
+  textSize(16);
+  text(message, 18, height - 18);
+  pop();
+}
+
+function getAudioStatusMessage() {
+  if (audioLoadError) {
+    return "Audio error. Check console for details.";
+  }
+
+  if (!drumSamplesLoaded) {
+    return "Loading drum sounds...";
+  }
+
+  const state = getAudioState();
+  if (state === "suspended") {
+    return "Click or tap once to enable sound.";
+  }
+
+  return "";
 }
