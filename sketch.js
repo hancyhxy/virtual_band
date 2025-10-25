@@ -3,6 +3,7 @@
 // Not for: Configuring MediaPipe Hands itself or handling browser permission prompts.
 
 import { initTracker, getLandmarks } from "./tracker.js";
+import { isInside, shouldTrigger } from "./hitmap.js";
 
 const MIRROR_PREVIEW = true; // Flip to false if you prefer a non-mirrored preview.
 const FINGER_TIP_ID = 8;
@@ -49,6 +50,17 @@ const DRUMS = [
   { id: "Hi-Hat", x: 0.8, y: 0.35, r: 0.1 }
 ];
 
+const HIT_SPEED_THRESHOLD = 500; // Minimum finger speed (px/s) required to count as a drum hit.
+const HIGHLIGHT_DURATION_MS = 120;
+const HIGHLIGHT_SCALE = 1.15;
+
+const drumStates = DRUMS.map(() => ({
+  prevInside: false,
+  highlightUntil: 0
+}));
+
+const previousFingerPositions = [];
+
 let trackerReady = false;
 let trackerError = null;
 let videoElementRef = null;
@@ -81,21 +93,65 @@ window.draw = () => {
     drawVideoFrame();
   }
 
-  drawDrums();
-
   if (trackerError) {
+    drawDrums();
     drawStatusMessage("Camera error: " + trackerError.message);
     return;
   }
 
   if (!trackerReady) {
+    drawDrums();
     drawStatusMessage("Starting camera...");
     return;
   }
 
   const hands = getLandmarks();
 
-  if (!hands || hands.length === 0) {
+  const hasHands = Array.isArray(hands) && hands.length > 0;
+
+  const fingerStates = [];
+
+  if (hasHands) {
+    // Track the fingertip in pixel space so we can measure entry speed.
+    hands.forEach((landmarks, handIndex) => {
+      const fingerTip = landmarks[FINGER_TIP_ID];
+      if (!fingerTip) {
+        fingerStates[handIndex] = { tip: null, speedPxPerSec: 0 };
+        previousFingerPositions[handIndex] = null;
+        return;
+      }
+
+      const tipPosition = convertToCanvasCoordinates(fingerTip);
+      const previousTip = previousFingerPositions[handIndex];
+      let speedPxPerSec = 0;
+
+      if (previousTip && deltaTime > 0) {
+        const dx = tipPosition.x - previousTip.x;
+        const dy = tipPosition.y - previousTip.y;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+        const seconds = deltaTime / 1000;
+        if (seconds > 0) {
+          speedPxPerSec = distance / seconds;
+        }
+      }
+
+      fingerStates[handIndex] = {
+        tip: tipPosition,
+        speedPxPerSec
+      };
+      previousFingerPositions[handIndex] = tipPosition;
+    });
+
+    previousFingerPositions.length = hands.length;
+  } else {
+    previousFingerPositions.length = 0;
+  }
+
+  updateDrumStates(fingerStates);
+
+  drawDrums();
+
+  if (!hasHands) {
     return;
   }
 
@@ -156,20 +212,66 @@ function convertToCanvasCoordinates(landmark) {
   return { x, y };
 }
 
+function updateDrumStates(fingerStates) {
+  const now = millis();
+  const canvasScale = Math.min(width, height);
+
+  // Compare each drum with the latest fingertip positions to detect new entries.
+  DRUMS.forEach((drum, index) => {
+    const center = convertToCanvasCoordinates(drum);
+    const radius = drum.r * canvasScale;
+    const hitArea = { center, radius };
+
+    let currInside = false;
+    let maxSpeed = 0;
+
+    fingerStates.forEach((finger) => {
+      if (!finger || !finger.tip) return;
+
+      if (isInside(finger.tip, hitArea)) {
+        currInside = true;
+        if (finger.speedPxPerSec > maxSpeed) {
+          maxSpeed = finger.speedPxPerSec;
+        }
+      }
+    });
+
+    const state = drumStates[index];
+    const triggered = shouldTrigger(state.prevInside, currInside, maxSpeed, HIT_SPEED_THRESHOLD);
+
+    if (triggered) {
+      state.highlightUntil = now + HIGHLIGHT_DURATION_MS;
+      console.log("HIT", drum.id);
+    }
+
+    state.prevInside = currInside;
+  });
+}
+
 function drawDrums() {
   push();
   textAlign(CENTER, CENTER);
-  DRUMS.forEach((drum) => {
-    const { x, y } = convertToCanvasCoordinates(drum);
-    const radius = drum.r * Math.min(width, height);
+  const now = millis();
 
-    stroke("#1d3557");
-    strokeWeight(3);
-    fill(236, 244, 255, 120);
+  // Render each drum with a brief highlight when a hit was registered.
+  DRUMS.forEach((drum, index) => {
+    const { x, y } = convertToCanvasCoordinates(drum);
+    const baseRadius = drum.r * Math.min(width, height);
+    const state = drumStates[index];
+    const isHighlighted = state && state.highlightUntil > now;
+    const radius = baseRadius * (isHighlighted ? HIGHLIGHT_SCALE : 1);
+
+    stroke(isHighlighted ? "#ff006e" : "#1d3557");
+    strokeWeight(isHighlighted ? 4 : 3);
+    if (isHighlighted) {
+      fill(255, 214, 165, 180);
+    } else {
+      fill(236, 244, 255, 120);
+    }
     circle(x, y, radius * 2);
 
     noStroke();
-    fill("#1d3557");
+    fill(isHighlighted ? "#ff006e" : "#1d3557");
     textSize(max(12, radius * 0.55));
     text(drum.id, x, y);
   });
