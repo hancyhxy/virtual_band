@@ -94,6 +94,29 @@ let videoElementRef = null;
 let drumSamplesLoaded = false;
 let audioLoadError = null;
 
+// Shader-based pixel effect state
+let pixelShader = null; // p5.Shader
+let glitchLayer = null; // p5.Graphics (WEBGL)
+let pixelFallback = null; // p5.Graphics (2D) for CPU fallback
+let videoBuffer = null; // p5.Graphics (2D) used as shader texture source
+let shaderReady = false;
+
+// Effect controls (always on by request)
+let PIXEL_SIZE = 12; // px
+let POSTERIZE_STEPS = 6; // levels
+let GLITCH_AMOUNT = 0.12; // 0..1
+let SCANLINE_AMOUNT = 0.2; // 0..1
+
+// Preload shader files so they’re ready before setup
+window.preload = () => {
+  try {
+    pixelShader = loadShader("assets/pixelate.vert", "assets/pixelate.frag");
+  } catch (e) {
+    // If loadShader fails (e.g., unsupported), we'll fall back to CPU path.
+    pixelShader = null;
+  }
+};
+
 window.setup = () => {
   const canvas = createCanvas(windowWidth, windowHeight);
   canvas.parent(document.querySelector("main"));
@@ -101,6 +124,25 @@ window.setup = () => {
   noStroke();
 
   videoElementRef = document.getElementById("hand-video");
+
+  // Prepare render targets
+  try {
+    glitchLayer = createGraphics(windowWidth, windowHeight, WEBGL);
+    glitchLayer.pixelDensity(1);
+    shaderReady = !!pixelShader;
+  } catch (e) {
+    glitchLayer = null;
+    shaderReady = false;
+  }
+
+  // CPU fallback buffer (small, upscaled)
+  pixelFallback = createGraphics(max(1, floor(windowWidth / PIXEL_SIZE)), max(1, floor(windowHeight / PIXEL_SIZE)), P2D);
+  pixelFallback.pixelDensity(1);
+  pixelFallback.noSmooth();
+
+  // 2D video staging buffer for shader texture
+  videoBuffer = createGraphics(windowWidth, windowHeight, P2D);
+  videoBuffer.pixelDensity(1);
 
   initTracker(videoElementRef)
     .then(() => {
@@ -234,11 +276,115 @@ window.draw = () => {
 
 window.windowResized = () => {
   resizeCanvas(windowWidth, windowHeight);
+  // Recreate WEBGL buffer on resize for correct resolution
+  if (glitchLayer) {
+    try {
+      glitchLayer.remove();
+    } catch (_) {}
+    glitchLayer = createGraphics(windowWidth, windowHeight, WEBGL);
+    glitchLayer.pixelDensity(1);
+  }
+  // Resize fallback buffer
+  if (pixelFallback) {
+    try { pixelFallback.remove(); } catch (_) {}
+    pixelFallback = createGraphics(max(1, floor(windowWidth / PIXEL_SIZE)), max(1, floor(windowHeight / PIXEL_SIZE)), P2D);
+    pixelFallback.pixelDensity(1);
+    pixelFallback.noSmooth();
+  }
+  // Resize video staging buffer
+  if (videoBuffer) {
+    try { videoBuffer.remove(); } catch (_) {}
+    videoBuffer = createGraphics(windowWidth, windowHeight, P2D);
+    videoBuffer.pixelDensity(1);
+  }
 };
 
 function drawVideoFrame() {
   if (!videoElementRef) return;
+  // Prefer shader path if WEBGL and shader are available
+  if (glitchLayer && pixelShader) {
+    // Draw current video frame into a 2D buffer first
+    videoBuffer.push();
+    videoBuffer.clear(0, 0, 0, 0);
+    // No mirroring here; shader handles flip
+    videoBuffer.drawingContext.drawImage(
+      videoElementRef,
+      0,
+      0,
+      videoBuffer.width,
+      videoBuffer.height
+    );
+    videoBuffer.pop();
 
+    const glw = glitchLayer.width;
+    const glh = glitchLayer.height;
+    glitchLayer.shader(pixelShader);
+    pixelShader.setUniform("tex0", videoBuffer);
+    pixelShader.setUniform("u_resolution", [glw, glh]);
+    pixelShader.setUniform("u_time", millis() / 1000.0);
+    pixelShader.setUniform("u_pixelSize", max(1, PIXEL_SIZE));
+    pixelShader.setUniform("u_posterizeSteps", max(1, POSTERIZE_STEPS));
+    pixelShader.setUniform("u_glitchAmt", constrain(GLITCH_AMOUNT, 0, 1));
+    pixelShader.setUniform("u_scanlineAmt", constrain(SCANLINE_AMOUNT, 0, 1));
+    pixelShader.setUniform("u_flipX", MIRROR_PREVIEW ? 1.0 : 0.0);
+
+    glitchLayer.noStroke();
+    glitchLayer.rectMode(CENTER);
+    glitchLayer.push();
+    // Full-screen quad in WEBGL mode (centered at 0,0)
+    glitchLayer.rect(0, 0, glw, glh);
+    glitchLayer.pop();
+
+    // Composite the processed layer back to the 2D canvas
+    image(glitchLayer, 0, 0, width, height);
+    return;
+  }
+
+  // CPU fallback: scale down then scale up to pixelate; apply simple posterize and warm tint.
+  if (pixelFallback) {
+    const smallW = max(1, floor(width / PIXEL_SIZE));
+    const smallH = max(1, floor(height / PIXEL_SIZE));
+    if (pixelFallback.width !== smallW || pixelFallback.height !== smallH) {
+      try { pixelFallback.remove(); } catch (_) {}
+      pixelFallback = createGraphics(smallW, smallH, P2D);
+      pixelFallback.pixelDensity(1);
+      pixelFallback.noSmooth();
+    }
+
+    // Draw video into the small buffer (with optional mirror)
+    pixelFallback.push();
+    pixelFallback.noSmooth();
+    pixelFallback.clear(0, 0, 0, 0);
+    // Use 2D drawImage to accept native HTMLVideoElement
+    pixelFallback.drawingContext.drawImage(
+      videoElementRef,
+      0,
+      0,
+      pixelFallback.width,
+      pixelFallback.height
+    );
+    pixelFallback.pop();
+
+    // Posterize approximation
+    try { pixelFallback.filter(POSTERIZE, max(2, floor(POSTERIZE_STEPS))); } catch (_) {}
+
+    // Warm tint overlay to echo pink/orange
+    pixelFallback.push();
+    pixelFallback.blendMode(MULTIPLY);
+    pixelFallback.noStroke();
+    pixelFallback.fill(255, 120, 80, 85); // warm orange
+    pixelFallback.rect(0, 0, pixelFallback.width, pixelFallback.height);
+    pixelFallback.pop();
+
+    // Now draw the tiny buffer scaled up without smoothing
+    push();
+    noSmooth();
+    image(pixelFallback, 0, 0, width, height);
+    pop();
+    return;
+  }
+
+  // Ultimate fallback: draw video directly (rare)
   push();
   if (MIRROR_PREVIEW) {
     translate(width, 0);
