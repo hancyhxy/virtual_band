@@ -12,6 +12,10 @@ uniform float u_posterizeSteps;// color posterization steps (>= 1)
 uniform float u_glitchAmt;     // 0..1, mild channel offset/jitter
 uniform float u_scanlineAmt;   // 0..1, scanline darkening
 uniform float u_flipX;         // mirror horizontally (to match preview) 0.0 or 1.0
+uniform float u_saturationBoost; // 0..2.2 extra saturation
+uniform float u_hueShiftDeg;     // -36..36 hue rotation in degrees
+uniform float u_vividness;       // 0..1.3 brightness lift
+uniform float u_colorFlash;      // 0..1.2 mix toward highlight color
 
 varying vec2 vTexCoord;
 
@@ -20,6 +24,20 @@ float hash21(vec2 p) {
   p = fract(p * vec2(123.34, 345.45));
   p += dot(p, p + 34.345);
   return fract(p.x * p.y);
+}
+
+vec3 rgb2hsv(vec3 c) {
+  vec4 K = vec4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
+  vec4 p = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));
+  vec4 q = mix(vec4(p.xyw, c.r), vec4(c.r, p.yzx), step(p.x, c.r));
+  float d = q.x - min(q.w, q.y);
+  float e = 1.0e-10;
+  return vec3(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x);
+}
+
+vec3 hsv2rgb(vec3 c) {
+  vec3 rgb = clamp(abs(mod(c.x * 6.0 + vec3(0.0, 4.0, 2.0), 6.0) - 3.0) - 1.0, 0.0, 1.0);
+  return c.z * mix(vec3(1.0), rgb, c.y);
 }
 
 vec3 applyPalette(vec3 col) {
@@ -62,6 +80,23 @@ void main() {
 
   // Warm palette remap (pink/orange)
   col = applyPalette(col);
+
+  // Audio-reactive adjustments: saturation, hue swing, and vividness lift
+  vec3 hsv = rgb2hsv(col);
+  float satBoost = clamp(u_saturationBoost, 0.0, 2.2);
+  hsv.y = clamp(hsv.y * (1.0 + satBoost), 0.0, 1.0);
+  float hueShift = clamp(u_hueShiftDeg / 360.0, -0.5, 0.5);
+  hsv.x = fract(hsv.x + hueShift + 1.0);
+  float vivid = clamp(u_vividness, 0.0, 1.3);
+  hsv.z = clamp(hsv.z * (1.0 + vivid * 0.35), 0.0, 1.0);
+  col = hsv2rgb(hsv);
+
+  float flash = clamp(u_colorFlash, 0.0, 1.2);
+  if (flash > 0.001) {
+    vec3 flashColor = vec3(1.0, 0.82, 0.28);
+    col = mix(col, flashColor, flash * 0.65);
+    col = mix(col, vec3(1.0), flash * 0.25);
+  }
 
   // Mild scanlines for texture
   if (u_scanlineAmt > 0.0) {

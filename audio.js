@@ -71,3 +71,7 @@ export function playDrum(drumId) {
 export function getAudioState() {
   return audioContext ? audioContext.state : "closed";
 }
+
+export function getSharedAudioContext() {
+  return getOrCreateAudioContext();
+}

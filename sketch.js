@@ -5,6 +5,12 @@
 import { initTracker, getLandmarks } from "./tracker.js";
 import { isInside, shouldTrigger } from "./hitmap.js";
 import { loadDrumSamples, playDrum, unlockAudio, getAudioState } from "./audio.js";
+import {
+  initAudioAnalysis,
+  updateAudioFrame,
+  getAudioReactState,
+  registerDrumImpulse
+} from "./sound.js";
 
 const MIRROR_PREVIEW = true; // Flip to false if you prefer a non-mirrored preview.
 const FINGER_TIP_ID = 8;
@@ -93,6 +99,9 @@ let trackerError = null;
 let videoElementRef = null;
 let drumSamplesLoaded = false;
 let audioLoadError = null;
+let audioAnalysisReady = false;
+let audioAnalysisError = null;
+let audioAnalysisPromise = null;
 
 // Shader-based pixel effect state
 let pixelShader = null; // p5.Shader
@@ -102,10 +111,21 @@ let videoBuffer = null; // p5.Graphics (2D) used as shader texture source
 let shaderReady = false;
 
 // Effect controls (always on by request)
-let PIXEL_SIZE = 12; // px
-let POSTERIZE_STEPS = 6; // levels
-let GLITCH_AMOUNT = 0.12; // 0..1
-let SCANLINE_AMOUNT = 0.2; // 0..1
+const PIXEL_SIZE_BASE = 12; // px
+const POSTERIZE_STEPS_BASE = 6; // levels
+const GLITCH_AMOUNT_BASE = 0.12; // 0..1
+const SCANLINE_AMOUNT_BASE = 0.2; // 0..1
+
+const pixelEffectState = {
+  size: PIXEL_SIZE_BASE,
+  posterize: POSTERIZE_STEPS_BASE,
+  glitch: GLITCH_AMOUNT_BASE,
+  scanline: SCANLINE_AMOUNT_BASE,
+  saturationBoost: 0,
+  hueShiftDeg: 0,
+  vividness: 0,
+  colorFlash: 0
+};
 
 // Preload shader files so they’re ready before setup
 window.preload = () => {
@@ -136,7 +156,11 @@ window.setup = () => {
   }
 
   // CPU fallback buffer (small, upscaled)
-  pixelFallback = createGraphics(max(1, floor(windowWidth / PIXEL_SIZE)), max(1, floor(windowHeight / PIXEL_SIZE)), P2D);
+  pixelFallback = createGraphics(
+    max(1, floor(windowWidth / pixelEffectState.size)),
+    max(1, floor(windowHeight / pixelEffectState.size)),
+    P2D
+  );
   pixelFallback.pixelDensity(1);
   pixelFallback.noSmooth();
 
@@ -178,6 +202,19 @@ window.setup = () => {
           console.error("Failed to load drum sounds during interaction:", error);
         });
     }
+
+    if (!audioAnalysisReady && !audioAnalysisError && !audioAnalysisPromise) {
+      audioAnalysisPromise = initAudioAnalysis()
+        .then(() => {
+          audioAnalysisReady = true;
+          audioAnalysisPromise = null;
+        })
+        .catch((error) => {
+          audioAnalysisError = error;
+          audioAnalysisPromise = null;
+          console.error("Failed to initialize audio analysis:", error);
+        });
+    }
   };
 
   window.mousePressed = handleUserInteraction;
@@ -190,6 +227,10 @@ window.setup = () => {
 
 window.draw = () => {
   background(16);
+
+  const dt = typeof deltaTime === "number" && isFinite(deltaTime) ? deltaTime : 16.67;
+  updateAudioFrame(dt);
+  updatePixelEffectFromAudio();
 
   const videoReady =
     videoElementRef && videoElementRef.readyState >= HTMLMediaElement.HAVE_ENOUGH_DATA;
@@ -287,7 +328,11 @@ window.windowResized = () => {
   // Resize fallback buffer
   if (pixelFallback) {
     try { pixelFallback.remove(); } catch (_) {}
-    pixelFallback = createGraphics(max(1, floor(windowWidth / PIXEL_SIZE)), max(1, floor(windowHeight / PIXEL_SIZE)), P2D);
+    pixelFallback = createGraphics(
+      max(1, floor(windowWidth / pixelEffectState.size)),
+      max(1, floor(windowHeight / pixelEffectState.size)),
+      P2D
+    );
     pixelFallback.pixelDensity(1);
     pixelFallback.noSmooth();
   }
@@ -298,6 +343,49 @@ window.windowResized = () => {
     videoBuffer.pixelDensity(1);
   }
 };
+
+function updatePixelEffectFromAudio() {
+  const react = getAudioReactState();
+  const active = !!react.active;
+
+  const sizeTargetRaw = active ? PIXEL_SIZE_BASE * react.pixelSizeFactor : PIXEL_SIZE_BASE;
+  const sizeTarget = constrain(sizeTargetRaw, PIXEL_SIZE_BASE * 0.8, PIXEL_SIZE_BASE * 1.8);
+  pixelEffectState.size = lerp(pixelEffectState.size, sizeTarget, active ? 0.32 : 0.18);
+
+  const posterizeTargetRaw = active
+    ? POSTERIZE_STEPS_BASE + react.vividness * 1.4
+    : POSTERIZE_STEPS_BASE;
+  const posterizeTarget = constrain(posterizeTargetRaw, 2, 8);
+  pixelEffectState.posterize = lerp(pixelEffectState.posterize, posterizeTarget, 0.24);
+
+  const glitchTargetRaw = active
+    ? GLITCH_AMOUNT_BASE + react.jitterStrength * 0.35
+    : GLITCH_AMOUNT_BASE;
+  const glitchTarget = constrain(glitchTargetRaw, 0, 0.48);
+  pixelEffectState.glitch = lerp(pixelEffectState.glitch, glitchTarget, 0.26);
+
+  const scanlineTargetRaw = active
+    ? lerp(SCANLINE_AMOUNT_BASE, SCANLINE_AMOUNT_BASE * 0.4, react.vividness)
+    : SCANLINE_AMOUNT_BASE;
+  const scanlineTarget = constrain(scanlineTargetRaw, 0, 1);
+  pixelEffectState.scanline = lerp(pixelEffectState.scanline, scanlineTarget, 0.2);
+
+  const saturationTarget = active ? constrain(react.saturationBoost, 0, 2.2) : 0;
+  pixelEffectState.saturationBoost = lerp(
+    pixelEffectState.saturationBoost,
+    saturationTarget,
+    active ? 0.38 : 0.22
+  );
+
+  const hueTarget = active ? constrain(react.hueShiftDeg, -36, 36) : 0;
+  pixelEffectState.hueShiftDeg = lerp(pixelEffectState.hueShiftDeg, hueTarget, active ? 0.42 : 0.22);
+
+  const vividnessTarget = active ? constrain(react.vividness, 0, 1.3) : 0;
+  pixelEffectState.vividness = lerp(pixelEffectState.vividness, vividnessTarget, active ? 0.36 : 0.2);
+
+  const flashTarget = active ? constrain(react.colorFlash, 0, 1.2) : 0;
+  pixelEffectState.colorFlash = lerp(pixelEffectState.colorFlash, flashTarget, active ? 0.5 : 0.22);
+}
 
 function drawVideoFrame() {
   if (!videoElementRef) return;
@@ -322,10 +410,14 @@ function drawVideoFrame() {
     pixelShader.setUniform("tex0", videoBuffer);
     pixelShader.setUniform("u_resolution", [glw, glh]);
     pixelShader.setUniform("u_time", millis() / 1000.0);
-    pixelShader.setUniform("u_pixelSize", max(1, PIXEL_SIZE));
-    pixelShader.setUniform("u_posterizeSteps", max(1, POSTERIZE_STEPS));
-    pixelShader.setUniform("u_glitchAmt", constrain(GLITCH_AMOUNT, 0, 1));
-    pixelShader.setUniform("u_scanlineAmt", constrain(SCANLINE_AMOUNT, 0, 1));
+    pixelShader.setUniform("u_pixelSize", max(1, pixelEffectState.size));
+    pixelShader.setUniform("u_posterizeSteps", max(1, pixelEffectState.posterize));
+    pixelShader.setUniform("u_glitchAmt", constrain(pixelEffectState.glitch, 0, 1));
+    pixelShader.setUniform("u_scanlineAmt", constrain(pixelEffectState.scanline, 0, 1));
+    pixelShader.setUniform("u_saturationBoost", constrain(pixelEffectState.saturationBoost, 0, 2.2));
+    pixelShader.setUniform("u_hueShiftDeg", pixelEffectState.hueShiftDeg);
+    pixelShader.setUniform("u_vividness", constrain(pixelEffectState.vividness, 0, 1.3));
+    pixelShader.setUniform("u_colorFlash", constrain(pixelEffectState.colorFlash, 0, 1.2));
     pixelShader.setUniform("u_flipX", MIRROR_PREVIEW ? 1.0 : 0.0);
 
     glitchLayer.noStroke();
@@ -342,8 +434,8 @@ function drawVideoFrame() {
 
   // CPU fallback: scale down then scale up to pixelate; apply simple posterize and warm tint.
   if (pixelFallback) {
-    const smallW = max(1, floor(width / PIXEL_SIZE));
-    const smallH = max(1, floor(height / PIXEL_SIZE));
+    const smallW = max(1, floor(width / pixelEffectState.size));
+    const smallH = max(1, floor(height / pixelEffectState.size));
     if (pixelFallback.width !== smallW || pixelFallback.height !== smallH) {
       try { pixelFallback.remove(); } catch (_) {}
       pixelFallback = createGraphics(smallW, smallH, P2D);
@@ -366,20 +458,43 @@ function drawVideoFrame() {
     pixelFallback.pop();
 
     // Posterize approximation
-    try { pixelFallback.filter(POSTERIZE, max(2, floor(POSTERIZE_STEPS))); } catch (_) {}
+    try { pixelFallback.filter(POSTERIZE, max(2, floor(pixelEffectState.posterize))); } catch (_) {}
 
     // Warm tint overlay to echo pink/orange
     pixelFallback.push();
     pixelFallback.blendMode(MULTIPLY);
     pixelFallback.noStroke();
-    pixelFallback.fill(255, 120, 80, 85); // warm orange
+    const overlayAlpha = constrain(85 + pixelEffectState.vividness * 45, 50, 140);
+    pixelFallback.fill(255, 120, 80, overlayAlpha);
     pixelFallback.rect(0, 0, pixelFallback.width, pixelFallback.height);
     pixelFallback.pop();
+
+    if (pixelEffectState.colorFlash > 0.02) {
+      pixelFallback.push();
+      pixelFallback.blendMode(ADD);
+      pixelFallback.noStroke();
+      const flashAlpha = constrain(pixelEffectState.colorFlash * 160, 0, 220);
+      pixelFallback.fill(255, 220, 140, flashAlpha);
+      pixelFallback.rect(0, 0, pixelFallback.width, pixelFallback.height);
+      pixelFallback.pop();
+    }
 
     // Now draw the tiny buffer scaled up without smoothing
     push();
     noSmooth();
-    image(pixelFallback, 0, 0, width, height);
+    const ctx = drawingContext;
+    if (typeof ctx.filter === "string") {
+      const previousFilter = ctx.filter;
+      const saturation = 1 + constrain(pixelEffectState.saturationBoost, 0, 2.2) * 0.5;
+      const hue = pixelEffectState.hueShiftDeg;
+      const brightness = 1 + pixelEffectState.vividness * 0.4 + pixelEffectState.colorFlash * 0.35;
+      const contrast = 1 + pixelEffectState.colorFlash * 0.25;
+      ctx.filter = `saturate(${saturation}) hue-rotate(${hue}deg) brightness(${brightness}) contrast(${contrast})`;
+      image(pixelFallback, 0, 0, width, height);
+      ctx.filter = previousFilter || "none";
+    } else {
+      image(pixelFallback, 0, 0, width, height);
+    }
     pop();
     return;
   }
@@ -473,6 +588,8 @@ function updateDrumStates(fingerStates) {
       );
       // Spawn bright pixel squares for visual feedback.
       spawnBurstForDrum(index, center, radius, intensity, { vx: impactVx, vy: impactVy });
+
+      registerDrumImpulse(drum.id, intensity);
 
       const played = playDrum(drum.id);
       if (!played && drumSamplesLoaded) {
@@ -819,13 +936,25 @@ function getAudioStatusMessage() {
     return "Audio error. Check console for details.";
   }
 
+  if (audioAnalysisError) {
+    return "Microphone blocked. Enable it for reactive pixels.";
+  }
+
   if (!drumSamplesLoaded) {
     return "Loading drum sounds...";
   }
 
   const state = getAudioState();
-  if (state === "suspended") {
-    return "Click or tap once to enable sound.";
+  const needsUnlock = state === "suspended";
+  const needsMic = !audioAnalysisReady;
+  if (needsUnlock || needsMic) {
+    if (needsUnlock && needsMic) {
+      return "Click once to enable sound + mic-reactive pixels.";
+    }
+    if (needsUnlock) {
+      return "Click or tap once to enable sound.";
+    }
+    return "Click or tap once to enable mic-reactive pixels.";
   }
 
   return "";
