@@ -134,16 +134,14 @@ function sampleFallbackPalette(luminance, progress, out = FALLBACK_PALETTE_TMP) 
   const mid = sampleStageColor(lum, FALLBACK_STAGE_COLORS[1], FALLBACK_STAGE_TMP1);
   const warm = sampleStageColor(lum, FALLBACK_STAGE_COLORS[2], FALLBACK_STAGE_TMP2);
 
-  const midBlend = smoothStep(0.25, 0.6, stage);
-  const warmBlend = smoothStep(0.65, 0.95, stage);
+  const coolWeight = smoothStep(0, 0.35, 1 - stage);
+  const midWeight = smoothStep(0.15, 0.65, stage) * smoothStep(1, 0.4, stage);
+  const warmWeight = smoothStep(0.55, 1, stage);
+  const total = Math.max(coolWeight + midWeight + warmWeight, 0.001);
 
-  const mixR = lerp(cool[0], mid[0], midBlend);
-  const mixG = lerp(cool[1], mid[1], midBlend);
-  const mixB = lerp(cool[2], mid[2], midBlend);
-
-  out[0] = Math.round(lerp(mixR, warm[0], warmBlend));
-  out[1] = Math.round(lerp(mixG, warm[1], warmBlend));
-  out[2] = Math.round(lerp(mixB, warm[2], warmBlend));
+  out[0] = Math.round((cool[0] * coolWeight + mid[0] * midWeight + warm[0] * warmWeight) / total);
+  out[1] = Math.round((cool[1] * coolWeight + mid[1] * midWeight + warm[1] * warmWeight) / total);
+  out[2] = Math.round((cool[2] * coolWeight + mid[2] * midWeight + warm[2] * warmWeight) / total);
   return out;
 }
 

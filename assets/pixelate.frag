@@ -80,11 +80,13 @@ vec3 applyPalette(vec3 col) {
   vec3 midStage = stagePalette1(lum);
   vec3 warmStage = stagePalette2(lum);
 
-  float midBlend = smoothstep(0.25, 0.6, stage);
-  float warmBlend = smoothstep(0.65, 0.95, stage);
+  float coolWeight = smoothstep(0.0, 0.35, 1.0 - stage);
+  float midWeight = smoothstep(0.15, 0.65, stage) * smoothstep(1.0, 0.4, stage);
+  float warmWeight = smoothstep(0.55, 1.0, stage);
 
-  vec3 mix01 = mix(coolStage, midStage, midBlend);
-  return mix(mix01, warmStage, warmBlend);
+  vec3 weighted = coolStage * coolWeight + midStage * midWeight + warmStage * warmWeight;
+  float total = max(coolWeight + midWeight + warmWeight, 0.001);
+  return weighted / total;
 }
 
 void main() {
