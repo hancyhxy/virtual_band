@@ -127,6 +127,30 @@ const pixelEffectState = {
   colorFlash: 0
 };
 
+const HIHAT_GLITCH_TUNING = {
+  baseDurationMs: 260,
+  extraDurationMs: 140,
+  decayPerFrame16ms: 0.86,
+  shaderGain: 0.7,
+  baseOffsetFraction: 0.02,
+  maxOffsetFraction: 0.05,
+  baseBands: 3,
+  bandBoost: 6,
+  lineAlphaBase: 30,
+  lineAlphaBoost: 110
+};
+
+if (typeof window !== "undefined") {
+  window.hiHatGlitchTuning = HIHAT_GLITCH_TUNING;
+}
+
+const hiHatGlitchState = {
+  active: false,
+  until: 0,
+  strength: 0,
+  jitterSeed: 0
+};
+
 // Preload shader files so they’re ready before setup
 window.preload = () => {
   try {
@@ -231,6 +255,7 @@ window.draw = () => {
   const dt = typeof deltaTime === "number" && isFinite(deltaTime) ? deltaTime : 16.67;
   updateAudioFrame(dt);
   updatePixelEffectFromAudio();
+  updateHiHatGlitch(dt);
 
   const videoReady =
     videoElementRef && videoElementRef.readyState >= HTMLMediaElement.HAVE_ENOUGH_DATA;
@@ -389,6 +414,7 @@ function updatePixelEffectFromAudio() {
 
 function drawVideoFrame() {
   if (!videoElementRef) return;
+  const hiHatStrength = hiHatGlitchState.active ? hiHatGlitchState.strength : 0;
   // Prefer shader path if WEBGL and shader are available
   if (glitchLayer && pixelShader) {
     // Draw current video frame into a 2D buffer first
@@ -412,7 +438,12 @@ function drawVideoFrame() {
     pixelShader.setUniform("u_time", millis() / 1000.0);
     pixelShader.setUniform("u_pixelSize", max(1, pixelEffectState.size));
     pixelShader.setUniform("u_posterizeSteps", max(1, pixelEffectState.posterize));
-    pixelShader.setUniform("u_glitchAmt", constrain(pixelEffectState.glitch, 0, 1));
+    const combinedGlitch = constrain(
+      pixelEffectState.glitch + hiHatStrength * HIHAT_GLITCH_TUNING.shaderGain,
+      0,
+      1
+    );
+    pixelShader.setUniform("u_glitchAmt", combinedGlitch);
     pixelShader.setUniform("u_scanlineAmt", constrain(pixelEffectState.scanline, 0, 1));
     pixelShader.setUniform("u_saturationBoost", constrain(pixelEffectState.saturationBoost, 0, 2.2));
     pixelShader.setUniform("u_hueShiftDeg", pixelEffectState.hueShiftDeg);
@@ -429,6 +460,7 @@ function drawVideoFrame() {
 
     // Composite the processed layer back to the 2D canvas
     image(glitchLayer, 0, 0, width, height);
+    applyHiHatGlitchOverlay(hiHatStrength);
     return;
   }
 
@@ -496,6 +528,7 @@ function drawVideoFrame() {
       image(pixelFallback, 0, 0, width, height);
     }
     pop();
+    applyHiHatGlitchOverlay(hiHatStrength);
     return;
   }
 
@@ -506,6 +539,52 @@ function drawVideoFrame() {
     scale(-1, 1);
   }
   drawingContext.drawImage(videoElementRef, 0, 0, width, height);
+  pop();
+  applyHiHatGlitchOverlay(hiHatStrength);
+}
+
+function applyHiHatGlitchOverlay(strength) {
+  if (!strength || strength <= 0.001) return;
+
+  const intensity = constrain(strength, 0, 1);
+  const sliceCount = HIHAT_GLITCH_TUNING.baseBands + floor(intensity * HIHAT_GLITCH_TUNING.bandBoost);
+  const maxOffset =
+    width * (HIHAT_GLITCH_TUNING.baseOffsetFraction + HIHAT_GLITCH_TUNING.maxOffsetFraction * intensity);
+  const verticalJitter = 4 + intensity * 22;
+  const baseSeed = hiHatGlitchState.jitterSeed + frameCount * 0.61;
+  const rand = (seed) => {
+    const x = Math.sin(seed) * 43758.5453123;
+    return x - floor(x);
+  };
+
+  for (let i = 0; i < sliceCount; i++) {
+    const seed = baseSeed + i * 3.17;
+    const bandHeight = constrain(height * (0.05 + rand(seed + 1) * 0.16) * (0.6 + intensity), 12, height);
+    const y = constrain(rand(seed + 2) * (height - bandHeight), 0, height - bandHeight);
+    const offset = (rand(seed + 3) * 2 - 1) * maxOffset;
+    const jitter = (rand(seed + 4) - 0.5) * verticalJitter;
+    copy(0, y, width, bandHeight, offset, y + jitter, width, bandHeight);
+  }
+
+  push();
+  blendMode(ADD);
+  strokeWeight(1);
+  stroke(
+    255,
+    80,
+    180,
+    constrain(
+      HIHAT_GLITCH_TUNING.lineAlphaBase + intensity * HIHAT_GLITCH_TUNING.lineAlphaBoost,
+      0,
+      255
+    )
+  );
+  const glitchLines = 5 + floor(intensity * 12);
+  for (let i = 0; i < glitchLines; i++) {
+    const seed = baseSeed + 90 + i * 1.73;
+    const y = rand(seed) * height;
+    line(-20, y, width + 20, y);
+  }
   pop();
 }
 
@@ -541,6 +620,34 @@ function convertToCanvasCoordinates(landmark) {
   const x = MIRROR_PREVIEW ? width - baseX : baseX;
   const y = landmark.y * height;
   return { x, y };
+}
+
+function triggerHiHatGlitch(intensity) {
+  const now = millis();
+  const normalized = constrain(intensity, 0, 1);
+  hiHatGlitchState.active = true;
+  hiHatGlitchState.until =
+    now + HIHAT_GLITCH_TUNING.baseDurationMs + normalized * HIHAT_GLITCH_TUNING.extraDurationMs;
+  hiHatGlitchState.strength = max(hiHatGlitchState.strength, 0.4 + normalized * 0.6);
+  hiHatGlitchState.jitterSeed = random(1e6);
+}
+
+function updateHiHatGlitch(dt) {
+  if (!hiHatGlitchState.active) return;
+
+  const now = millis();
+  if (now >= hiHatGlitchState.until) {
+    hiHatGlitchState.active = false;
+    hiHatGlitchState.strength = 0;
+    return;
+  }
+
+  const frameRatio = dt > 0 ? dt / 16.67 : 1;
+  const decayFactor = pow(HIHAT_GLITCH_TUNING.decayPerFrame16ms, frameRatio);
+  hiHatGlitchState.strength *= decayFactor;
+  if (hiHatGlitchState.strength < 0.01) {
+    hiHatGlitchState.strength = 0;
+  }
 }
 
 function updateDrumStates(fingerStates) {
@@ -590,6 +697,10 @@ function updateDrumStates(fingerStates) {
       spawnBurstForDrum(index, center, radius, intensity, { vx: impactVx, vy: impactVy });
 
       registerDrumImpulse(drum.id, intensity);
+
+      if (drum.id === "Hi-Hat") {
+        triggerHiHatGlitch(intensity);
+      }
 
       const played = playDrum(drum.id);
       if (!played && drumSamplesLoaded) {
