@@ -54,7 +54,7 @@ const DRUMS = [
   { id: "Kick", x: 0.5, y: 0.78, r: 0.2 },
   { id: "Snare", x: 0.35, y: 0.58, r: 0.14 },
   { id: "Tom", x: 0.62, y: 0.45, r: 0.12 },
-  { id: "Hi-Hat", x: 0.8, y: 0.35, r: 0.1 }
+  { id: "Hi-Hat", x: 0.8, y: 0.35, r: 0.14 }
 ];
 
 const HIT_SPEED_THRESHOLD = 500; // Minimum finger speed (px/s) required to count as a drum hit.
