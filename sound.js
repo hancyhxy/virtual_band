@@ -46,7 +46,8 @@ const reactState = {
   rhythmDensity: 0,
   bassLevel: 0,
   midLevel: 0,
-  trebleLevel: 0
+  trebleLevel: 0,
+  paletteProgress: 0
 };
 
 const DRUM_IMPULSE_PROFILES = {
@@ -288,6 +289,17 @@ export function updateAudioFrame(deltaMs = 16.67) {
   );
   reactState.colorFlash = smooth(reactState.colorFlash, flashTarget, 0.45);
 
+  const paletteEnergy = clamp(
+    impulseEnergy * 0.6 +
+      combinedTreble * 0.45 +
+      combinedMid * 0.35 +
+      reactState.rhythmDensity * 0.3,
+    0,
+    1.5
+  );
+  const paletteTarget = clamp(paletteEnergy, 0, 1);
+  reactState.paletteProgress = smooth(reactState.paletteProgress, paletteTarget, 0.32);
+
   reactState.bassLevel = combinedBass;
   reactState.midLevel = combinedMid;
   reactState.trebleLevel = combinedTreble;
@@ -341,4 +353,5 @@ export function disposeAudioAnalysis() {
   reactState.bassLevel = 0;
   reactState.midLevel = 0;
   reactState.trebleLevel = 0;
+  reactState.paletteProgress = 0;
 }

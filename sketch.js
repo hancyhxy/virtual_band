@@ -80,6 +80,73 @@ const PARTICLE_SPEED_MAX = 360; // px/s
 const PARTICLE_DAMPING = 0.9;   // velocity damping factor (frame-rate adjusted)
 const PARTICLE_MAX_ACTIVE = 160; // cap per drum for performance
 
+const FALLBACK_STAGE_COLORS = [
+  {
+    shadow: [0, 82, 133],
+    mid: [0, 179, 199],
+    highlight: [108, 255, 245]
+  },
+  {
+    shadow: [13, 23, 88],
+    mid: [76, 84, 184],
+    highlight: [188, 150, 249]
+  },
+  {
+    shadow: [138, 32, 108],
+    mid: [240, 96, 158],
+    highlight: [255, 177, 120]
+  }
+];
+
+const FALLBACK_STAGE_TMP0 = [0, 0, 0];
+const FALLBACK_STAGE_TMP1 = [0, 0, 0];
+const FALLBACK_STAGE_TMP2 = [0, 0, 0];
+const FALLBACK_PALETTE_TMP = [0, 0, 0];
+
+function smoothStep(edge0, edge1, x) {
+  const denom = Math.max(edge1 - edge0, 1e-4);
+  const t = constrain((x - edge0) / denom, 0, 1);
+  return t * t * (3 - 2 * t);
+}
+
+function sampleStageColor(luminance, stage, out) {
+  const shadowMix = smoothStep(0, 0.45, luminance);
+  const highlightMix = smoothStep(0.45, 1, luminance);
+  const shadow = stage.shadow;
+  const mid = stage.mid;
+  const highlight = stage.highlight;
+
+  const baseR = lerp(shadow[0], mid[0], shadowMix);
+  const baseG = lerp(shadow[1], mid[1], shadowMix);
+  const baseB = lerp(shadow[2], mid[2], shadowMix);
+
+  out[0] = lerp(baseR, highlight[0], highlightMix);
+  out[1] = lerp(baseG, highlight[1], highlightMix);
+  out[2] = lerp(baseB, highlight[2], highlightMix);
+  return out;
+}
+
+function sampleFallbackPalette(luminance, progress, out = FALLBACK_PALETTE_TMP) {
+  const lum = constrain(luminance, 0, 1);
+  const stage = constrain(progress, 0, 1);
+
+  const cool = sampleStageColor(lum, FALLBACK_STAGE_COLORS[0], FALLBACK_STAGE_TMP0);
+  const mid = sampleStageColor(lum, FALLBACK_STAGE_COLORS[1], FALLBACK_STAGE_TMP1);
+  const warm = sampleStageColor(lum, FALLBACK_STAGE_COLORS[2], FALLBACK_STAGE_TMP2);
+
+  const midBlend = smoothStep(0.25, 0.6, stage);
+  const warmBlend = smoothStep(0.65, 0.95, stage);
+
+  const mixR = lerp(cool[0], mid[0], midBlend);
+  const mixG = lerp(cool[1], mid[1], midBlend);
+  const mixB = lerp(cool[2], mid[2], midBlend);
+
+  out[0] = Math.round(lerp(mixR, warm[0], warmBlend));
+  out[1] = Math.round(lerp(mixG, warm[1], warmBlend));
+  out[2] = Math.round(lerp(mixB, warm[2], warmBlend));
+  return out;
+}
+
 // Dynamic controls (can be toggled)
 let EFFECT_MODE = "random"; // "random" | "burst" | "spray" | "cluster" | "ring"
 let SPARKLES_ENABLED = true; // allow occasional white/gold sparkles
@@ -124,7 +191,8 @@ const pixelEffectState = {
   saturationBoost: 0,
   hueShiftDeg: 0,
   vividness: 0,
-  colorFlash: 0
+  colorFlash: 0,
+  paletteProgress: 0
 };
 
 const HIHAT_GLITCH_TUNING = {
@@ -410,6 +478,13 @@ function updatePixelEffectFromAudio() {
 
   const flashTarget = active ? constrain(react.colorFlash, 0, 1.2) : 0;
   pixelEffectState.colorFlash = lerp(pixelEffectState.colorFlash, flashTarget, active ? 0.5 : 0.22);
+
+  const paletteTarget = active ? constrain(react.paletteProgress, 0, 1) : 0;
+  pixelEffectState.paletteProgress = lerp(
+    pixelEffectState.paletteProgress,
+    paletteTarget,
+    active ? 0.38 : 0.2
+  );
 }
 
 function drawVideoFrame() {
@@ -449,6 +524,7 @@ function drawVideoFrame() {
     pixelShader.setUniform("u_hueShiftDeg", pixelEffectState.hueShiftDeg);
     pixelShader.setUniform("u_vividness", constrain(pixelEffectState.vividness, 0, 1.3));
     pixelShader.setUniform("u_colorFlash", constrain(pixelEffectState.colorFlash, 0, 1.2));
+    pixelShader.setUniform("u_paletteProgress", constrain(pixelEffectState.paletteProgress, 0, 1));
     pixelShader.setUniform("u_flipX", MIRROR_PREVIEW ? 1.0 : 0.0);
 
     glitchLayer.noStroke();
@@ -492,21 +568,30 @@ function drawVideoFrame() {
     // Posterize approximation
     try { pixelFallback.filter(POSTERIZE, max(2, floor(pixelEffectState.posterize))); } catch (_) {}
 
-    // Warm tint overlay to echo pink/orange
-    pixelFallback.push();
-    pixelFallback.blendMode(MULTIPLY);
-    pixelFallback.noStroke();
-    const overlayAlpha = constrain(85 + pixelEffectState.vividness * 45, 50, 140);
-    pixelFallback.fill(255, 120, 80, overlayAlpha);
-    pixelFallback.rect(0, 0, pixelFallback.width, pixelFallback.height);
-    pixelFallback.pop();
+    // Remap luminance to the cool-to-warm palette used in the shader path
+    try {
+      pixelFallback.loadPixels();
+      const data = pixelFallback.pixels;
+      const length = data.length;
+      for (let i = 0; i < length; i += 4) {
+        const r = data[i];
+        const g = data[i + 1];
+        const b = data[i + 2];
+        const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+        const paletteColor = sampleFallbackPalette(luminance, pixelEffectState.paletteProgress);
+        data[i] = paletteColor[0];
+        data[i + 1] = paletteColor[1];
+        data[i + 2] = paletteColor[2];
+      }
+      pixelFallback.updatePixels();
+    } catch (_) {}
 
     if (pixelEffectState.colorFlash > 0.02) {
       pixelFallback.push();
       pixelFallback.blendMode(ADD);
       pixelFallback.noStroke();
       const flashAlpha = constrain(pixelEffectState.colorFlash * 160, 0, 220);
-      pixelFallback.fill(255, 220, 140, flashAlpha);
+      pixelFallback.fill(255, 235, 115, flashAlpha);
       pixelFallback.rect(0, 0, pixelFallback.width, pixelFallback.height);
       pixelFallback.pop();
     }

@@ -1,5 +1,5 @@
 // assets/pixelate.frag
-// Pixelation + pink/orange palette remap with optional subtle RGB split and scanlines.
+// Pixelation + cool-to-warm palette remap with optional subtle RGB split and scanlines.
 // Designed for use with p5.js (createGraphics WEBGL + shader).
 
 precision mediump float;
@@ -16,6 +16,7 @@ uniform float u_saturationBoost; // 0..2.2 extra saturation
 uniform float u_hueShiftDeg;     // -36..36 hue rotation in degrees
 uniform float u_vividness;       // 0..1.3 brightness lift
 uniform float u_colorFlash;      // 0..1.2 mix toward highlight color
+uniform float u_paletteProgress; // 0..1 stage blend from cool teal to warm pink/orange
 
 varying vec2 vTexCoord;
 
@@ -40,18 +41,50 @@ vec3 hsv2rgb(vec3 c) {
   return c.z * mix(vec3(1.0), rgb, c.y);
 }
 
+vec3 stageBlend(float lum, vec3 shadow, vec3 mid, vec3 highlight) {
+  float easedShadow = smoothstep(0.0, 0.45, lum);
+  float easedHighlight = smoothstep(0.45, 1.0, lum);
+  vec3 base = mix(shadow, mid, easedShadow);
+  return mix(base, highlight, easedHighlight);
+}
+
+vec3 stagePalette0(float lum) {
+  return stageBlend(lum,
+    vec3(0.00, 0.32, 0.52), // vivid teal shadow
+    vec3(0.00, 0.70, 0.78), // saturated aqua
+    vec3(0.42, 1.00, 0.96)  // electric cyan
+  );
+}
+
+vec3 stagePalette1(float lum) {
+  return stageBlend(lum,
+    vec3(0.05, 0.09, 0.34), // indigo shadow
+    vec3(0.30, 0.34, 0.70), // mid blue-violet
+    vec3(0.73, 0.58, 0.98)  // lilac highlight
+  );
+}
+
+vec3 stagePalette2(float lum) {
+  return stageBlend(lum,
+    vec3(0.54, 0.12, 0.32), // magenta shadow
+    vec3(0.93, 0.30, 0.56), // pink midtone
+    vec3(1.00, 0.66, 0.28)  // peach highlight
+  );
+}
+
 vec3 applyPalette(vec3 col) {
-  // Map luminance to a warm pink/orange ramp.
-  // Three anchors blended by luminance for vibrant but readable tones.
-  float l = dot(col, vec3(0.299, 0.587, 0.114));
-  vec3 c0 = vec3(0.96, 0.10, 0.45); // deep magenta-pink
-  vec3 c1 = vec3(1.00, 0.35, 0.35); // hot pink
-  vec3 c2 = vec3(1.00, 0.55, 0.00); // orange
-  // Smooth 2-stop blend: [0..0.6] blend c0->c1, [0.6..1] c1->c2
-  float t = clamp(l, 0.0, 1.0);
-  vec3 mid = mix(c0, c1, smoothstep(0.0, 0.6, t));
-  vec3 outCol = mix(mid, c2, smoothstep(0.55, 1.0, t));
-  return outCol;
+  float lum = dot(col, vec3(0.299, 0.587, 0.114));
+  float stage = clamp(u_paletteProgress, 0.0, 1.0);
+
+  vec3 coolStage = stagePalette0(lum);
+  vec3 midStage = stagePalette1(lum);
+  vec3 warmStage = stagePalette2(lum);
+
+  float midBlend = smoothstep(0.25, 0.6, stage);
+  float warmBlend = smoothstep(0.65, 0.95, stage);
+
+  vec3 mix01 = mix(coolStage, midStage, midBlend);
+  return mix(mix01, warmStage, warmBlend);
 }
 
 void main() {
@@ -78,7 +111,7 @@ void main() {
   float steps = max(u_posterizeSteps, 1.0);
   col = floor(col * steps) / steps;
 
-  // Warm palette remap (pink/orange)
+  // Cool-to-warm palette remap
   col = applyPalette(col);
 
   // Audio-reactive adjustments: saturation, hue swing, and vividness lift
@@ -93,7 +126,7 @@ void main() {
 
   float flash = clamp(u_colorFlash, 0.0, 1.2);
   if (flash > 0.001) {
-    vec3 flashColor = vec3(1.0, 0.82, 0.28);
+    vec3 flashColor = vec3(1.0, 0.92, 0.45);
     col = mix(col, flashColor, flash * 0.65);
     col = mix(col, vec3(1.0), flash * 0.25);
   }
